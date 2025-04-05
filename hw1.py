@@ -7,90 +7,91 @@ import numpy as np
 import functools
 import cvxpy as cp
 from scipy import signal
+import scipy.linalg as la
 
 
 ############################## P1
 
-class Dynamics(metaclass=abc.ABCMeta):
-    dynamics_func: Callable
-    state_dim: int
-    control_dim: int
-
-    def __init__(self, dynamics_func, state_dim, control_dim):
-        self.dynamics_func = dynamics_func
-        self.state_dim = state_dim
-        self.control_dim = control_dim
-
-    def __call__(self, state, control, time=0):
-        return self.dynamics_func(state, control, time)
-
-
-ss = 2
-
-
-def dynamic_unicycle_ode(state, control, time):
-    x = jnp.array(state)
-    u = jnp.array(control)
-    x_dot = jnp.array([x[3] * jnp.cos(x[2]),
-                       x[3] * jnp.sin(x[2]),
-                       u[0],
-                       u[1]])
-
-    ss = 2
-    return x_dot
-
-
-state_dim = 4
-control_dim = 2
-continuous_dynamics = Dynamics(dynamic_unicycle_ode, state_dim, control_dim)
-ss = 2
-
-
-def euler_integrate(dynamics, dt):
-    def integrator(x, u, t):
-        x_dot = dynamics(x, u, t)
-        xtp1 = x + x_dot * dt
-        return xtp1
-
-    return integrator
-
-
-## I choose to use RK4 (https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods)
-def runge_kutta_integrator(dynamics, dt):
-    def integrator(x, u, t):
-        k1 = dynamics(x, u, t)
-        k2 = dynamics(x + dt * k1 / 2, u, t + dt / 2)
-        k3 = dynamics(x + dt * k2 / 2, u, t + dt / 2)
-        k4 = dynamics(x + dt * k3, u, t + dt)
-        xtp1 = x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
-        return xtp1
-
-    return integrator
-
-
-# Example usage of the integrators
-
-dt = 0.1  # Default timestep size
-
-discrete_dynamics_euler = Dynamics(
-    euler_integrate(continuous_dynamics, dt), state_dim, control_dim
-)
-discrete_dynamics_rk = Dynamics(
-    runge_kutta_integrator(continuous_dynamics, dt), state_dim, control_dim
-)
-
-
-def simulate(dynamics, initial_state, controls, dt):
-    t = 0
-    x_t = initial_state
-    x_all = initial_state
-    for u in controls:
-        x_tp1 = dynamics(x_t, u, t)  # discrete dynamics
-        x_all = jnp.vstack((x_all, x_tp1))
-        x_t = x_tp1
-        t = t + dt
-
-    return x_all
+# class Dynamics(metaclass=abc.ABCMeta):
+#     dynamics_func: Callable
+#     state_dim: int
+#     control_dim: int
+#
+#     def __init__(self, dynamics_func, state_dim, control_dim):
+#         self.dynamics_func = dynamics_func
+#         self.state_dim = state_dim
+#         self.control_dim = control_dim
+#
+#     def __call__(self, state, control, time=0):
+#         return self.dynamics_func(state, control, time)
+#
+#
+# ss = 2
+#
+#
+# def dynamic_unicycle_ode(state, control, time):
+#     x = jnp.array(state)
+#     u = jnp.array(control)
+#     x_dot = jnp.array([x[3] * jnp.cos(x[2]),
+#                        x[3] * jnp.sin(x[2]),
+#                        u[0],
+#                        u[1]])
+#
+#     ss = 2
+#     return x_dot
+#
+#
+# state_dim = 4
+# control_dim = 2
+# continuous_dynamics = Dynamics(dynamic_unicycle_ode, state_dim, control_dim)
+# ss = 2
+#
+#
+# def euler_integrate(dynamics, dt):
+#     def integrator(x, u, t):
+#         x_dot = dynamics(x, u, t)
+#         xtp1 = x + x_dot * dt
+#         return xtp1
+#
+#     return integrator
+#
+#
+# ## I choose to use RK4 (https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods)
+# def runge_kutta_integrator(dynamics, dt):
+#     def integrator(x, u, t):
+#         k1 = dynamics(x, u, t)
+#         k2 = dynamics(x + dt * k1 / 2, u, t + dt / 2)
+#         k3 = dynamics(x + dt * k2 / 2, u, t + dt / 2)
+#         k4 = dynamics(x + dt * k3, u, t + dt)
+#         xtp1 = x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+#         return xtp1
+#
+#     return integrator
+#
+#
+# # Example usage of the integrators
+#
+# dt = 0.1  # Default timestep size
+#
+# discrete_dynamics_euler = Dynamics(
+#     euler_integrate(continuous_dynamics, dt), state_dim, control_dim
+# )
+# discrete_dynamics_rk = Dynamics(
+#     runge_kutta_integrator(continuous_dynamics, dt), state_dim, control_dim
+# )
+#
+#
+# def simulate(dynamics, initial_state, controls, dt):
+#     t = 0
+#     x_t = initial_state
+#     x_all = initial_state
+#     for u in controls:
+#         x_tp1 = dynamics(x_t, u, t)  # discrete dynamics
+#         x_all = jnp.vstack((x_all, x_tp1))
+#         x_t = x_tp1
+#         t = t + dt
+#
+#     return x_all
 
 
 # initial_state = jnp.array([0.0, 0.0, 0.0, 0.0])
@@ -245,3 +246,243 @@ def simulate(dynamics, initial_state, controls, dt):
 # linear_rk4_B = np.array(linear_rk4[1])
 
 ############################## P3
+# def f(x):
+#     return (x + 2) ** 2 + 5 * jnp.tanh(x)
+
+
+# args = np.arange(-6, 4, 0.01)
+# plt.figure(figsize=(8, 6))
+# plt.plot(args, f(args))
+# plt.xlabel('x')
+# plt.ylabel('f(x)')
+# plt.title('Objective function')
+# plt.grid(alpha=0.3)
+
+
+# plt.show()
+
+
+# def minimize_with_gradient_descent(f, initial_guess, step_size, tol=1e-8):
+#     x_history = jnp.array(initial_guess)
+#     x_i = jnp.array(initial_guess)
+#     a = jnp.array(step_size)
+#     x_ip1 = jnp.array([100])
+#     count = 0
+#     while np.abs(np.array(x_ip1) - np.array(x_i)) >= tol:
+#         if count != 0:
+#             x_i = x_ip1
+#         grad_i = jax.jacobian(lambda x: f(x))(x_i)
+#         x_ip1 = x_i - a * grad_i
+#         x_history = jnp.vstack((x_history, x_ip1))
+#         count = count + 1
+#
+#     return x_history  # update this line
+#
+
+# x_opt = minimize_with_gradient_descent(f, 5.0, 0.1)
+# x_opt = np.array(x_opt)
+# # output and plot:
+# print('optimal x:', x_opt)
+# print('optimal value of f(x):', f(x_opt))
+#
+# args = np.arange(-6, 4, 0.01)
+# plt.figure(figsize=(8, 6))
+# plt.plot(args, f(args), label='f(x)')
+# for i in range(np.size(x_opt)):
+#     plt.scatter(x_opt[i], f(x_opt[i]), color='b')
+# plt.scatter(x_opt[-1], f(x_opt[-1]), zorder=2, color='red', label='optimal point')
+# plt.title('x_opt = {:.4f}, f(x_opt) = {:.4f}'.format(float(x_opt[-1]), float(np.array(f(x_opt[-1])))))
+# plt.grid(alpha=0.3)
+# plt.xlabel('x')
+# plt.ylabel('f(x)')
+# plt.legend()
+# plt.show()
+
+
+# # fill out g(x) so that the statement g(x) < 0 is equivalent to the statement x > 1
+# def g(x):
+#     return 1 - x
+#
+#
+# def phi(f, x, g, t):
+#     x = jnp.array(x)
+#     phi_fun = f(x) - t * jnp.log(-g(x))
+#     return phi_fun  # update this line
+#
+#
+# x_upper = 4
+# dx = 0.01
+# f_x_domain = np.arange(-6, x_upper, dx)
+# phi_x_domain = np.arange(1.00001, x_upper, dx)
+#
+
+# plt.figure(figsize=(8, 6))
+# plt.plot(f_x_domain, f(f_x_domain), label='f(x)')
+# plt.plot(phi_x_domain, phi(f, phi_x_domain, g, 5), label='phi(x), t = 5')
+# plt.plot(phi_x_domain, phi(f, phi_x_domain, g, 2), label='phi(x), t = 2')
+# plt.plot(phi_x_domain, phi(f, phi_x_domain, g, 0.5), label='phi(x), t = 0.5')
+# plt.vlines(1, -10, 40, linestyles='dashed', label='x = 1', color='black')
+# plt.xlabel('x')
+# plt.grid(alpha=0.3)
+# plt.ylabel('f(x), phi(x)')
+# plt.title('f(x) and phi(x) vs x')
+# plt.legend(loc='upper left')
+# # plt.ylim(-10, 40)
+# plt.show()
+
+
+# def minimize_with_gradient_descent_log_barrier(f, initial_guess, step_size, t, tol=1e-3):
+#     x_history = jnp.array(initial_guess)
+#     x_i = jnp.array(initial_guess)
+#     a = jnp.array(step_size)
+#     t = jnp.array(t)
+#     x_ip1 = jnp.array([100])
+#     count = 0
+#     while np.abs(np.array(x_ip1) - np.array(x_i)) >= tol:
+#         if count != 0:
+#             x_i = x_ip1
+#         grad_i = jax.jacobian(lambda x: phi(f, x, g, t))(x_i)
+#         x_ip1 = x_i - a * grad_i
+#         x_history = jnp.vstack((x_history, x_ip1))
+#         print(np.array(x_ip1))
+#
+#         count = count + 1
+#
+#     return x_history  # update this line
+#
+#
+# t_list = jnp.array([0.5, 2, 5])
+# step_size = 0.001
+# x_optimal_list = []
+# for t in t_list:
+#     x_optimal_list.append(minimize_with_gradient_descent_log_barrier(f, 1.3, step_size, t))
+#
+#
+#
+# for i in range(3):
+#     x_opt_i = np.array(x_optimal_list[i])
+#     t_i = t_list[i]
+#     plt.subplot(3, 1, i + 1)
+#     plt.plot(phi_x_domain, phi(f, phi_x_domain, g, t_i), label='phi(x)')
+#     args = np.arange(-6, 4, 0.01)
+#     plt.plot(args, f(args), label='f(x)')
+#     for j in range(np.size(x_opt_i)):
+#         plt.scatter(x_opt_i[j], phi(f, x_opt_i[j], g, t_i), color='b')
+#     plt.scatter(x_opt_i[-1], phi(f, x_opt_i[j], g, t_i), zorder=2, color='red', label='optimal point')
+#     plt.grid(alpha=0.3)
+#     plt.xlabel('x')
+#     plt.ylabel('f(x)')
+#     plt.legend()
+# plt.show()
+
+
+############################## P4
+# x = cp.Variable(3)
+# f0 = cp.square(x[0]) + 2 * cp.square(x[1]) + 3.5 * cp.square(x[2])
+# A = np.array([[0.707, 0.707, 0],
+#               [-1, 0, 0],
+#               [0, -1, 0],
+#               [0, 0, -1]])
+# B = np.array([2, -1, -1, -3])
+# constraint = [A @ x <= B]
+# problem = cp.Problem(cp.Minimize(f0), constraint)
+# problem.solve(solver=cp.CLARABEL)
+# x_val = x.value
+# print(problem.value)
+# print(x_val)
+# print(A @ x_val)
+
+
+############################## P5
+def f(x_t: jnp.ndarray, u_t: jnp.ndarray) -> jnp.ndarray:
+    f_t = u_t + 0 * x_t
+    return f_t
+
+
+def b(x_t: jnp.ndarray) -> jnp.ndarray:
+    b_t = jnp.square(x_t) - 1
+    return b_t
+
+
+def b_grad(b, x_t: jnp.ndarray) -> jnp.ndarray:
+    b_grad_t = jax.jacobian(lambda x: b(x))(x_t)
+
+    return b_grad_t
+
+
+def continuous_linear_dynamic(f, x_t, u_t) -> tuple:
+    A = jax.jacobian(lambda x: f(x, u_t))(x_t)
+
+    B = jax.jacobian(lambda u: f(x_t, u))(u_t)
+    return A, B
+
+
+def discrete_linear_dynamic(A, B, dt) -> tuple:
+    C = np.eye(1)
+    D = np.zeros(1)
+    sys = signal.StateSpace(A, B, C, D)
+    sysd = sys.to_discrete(dt)
+    Ad = sysd.A
+    Bd = sysd.B
+    return Ad, Bd
+
+
+## general constants
+x_list = np.array([-3, -2, -1.1])
+u_des = 0.5
+a = 0.5
+a_list = np.array([2, 1, 0.5, 0.1])
+dt = 0.05
+T = 500
+## generate discrete system numeriaclly (LTI)
+x = jnp.array([0.0])
+u = jnp.array([0.0])
+jax.jacobian(lambda x: f(x, u))(x)
+[A, B] = continuous_linear_dynamic(f, x, u)
+A = np.array(A)
+B = np.array(B)
+[Ad, Bd] = discrete_linear_dynamic(A, B, dt)
+
+# for x_para in x_list:
+#     x = cp.Parameter()
+#     u = cp.Variable(1)
+#     x.value = x_para
+#     f0 = cp.square(u - u_des)
+#     constraint = [2 * x * u >= - a * (cp.square(x) - 1)]
+#     problem = cp.Problem(cp.Minimize(f0), constraint)
+#     problem.solve(solver=cp.CLARABEL)
+#     print(u.value)
+
+x_all = []
+u_all = []
+for a_para in a_list:
+    x_i = np.zeros(T)
+    u_i = np.zeros(T - 1)
+    x_i[0] = -5.0
+    a = cp.Parameter()
+    a.value = a_para
+    for t in range(T - 1):
+        x_i_t = x_i[t]
+        u_t = cp.Variable(1)
+        f0 = cp.square(u - u_des)
+        constraint = [2 * x_i_t * u_t >= -a * (cp.square(x_i_t) - 1)]
+        problem = cp.Problem(cp.Minimize(f0), constraint)
+        problem.solve(solver=cp.CLARABEL)
+        u_t_val = u_t.value
+        x_i[t + 1] = Ad * x_i_t + Bd * u_t_val
+        u_i[t] =u_t_val
+    x_all.append(x_i)
+    u_all.append(u_i)
+
+t_all = np.linspace(0, (500 - 1) * dt, 500)
+for i in range(4):
+    x_i = x_all[i]
+    u_i = u_all[i]
+    plt.subplot(2, 1, 1)
+    plt.plot(t_all, x_i)
+    plt.grid()
+    plt.subplot(2, 1, 2)
+    plt.plot(t_all[0:T - 1], u_i)
+    plt.grid()
+plt.show()
+ss = 2
