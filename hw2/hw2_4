@@ -1,0 +1,278 @@
+import cvxpy as cp  # import cvxpy
+
+# in this problem, we will use the dynamaxsys library to import dynamical systems implemented in JAX: https://github.com/UW-CTRL/dynamaxsys
+from dynamaxsys.simplecar import DynamicallyExtendedSimpleCar
+from dynamaxsys.base import get_discrete_time_dynamics
+from dynamaxsys.utils import linearize
+
+import jax
+import jax.numpy as jnp
+import matplotlib.pyplot as plt
+import numpy as np
+import functools
+import functools
+from ipywidgets import interact
+
+# define the robot dynamics
+wheelbase = 1.0
+dt = 0.1
+ct_robot_dynamics = DynamicallyExtendedSimpleCar(wheelbase=wheelbase)  # robot dynamics
+dt_robot_dynamics = get_discrete_time_dynamics(ct_robot_dynamics, dt=dt)  # discrete time dynamics
+state_dim = dt_robot_dynamics.state_dim
+control_dim = dt_robot_dynamics.control_dim
+
+
+# some helper functions
+
+# define obstacle function g(x) >= 0
+# where g(x) is the distance from the obstacle
+@jax.jit
+def obstacle_constraint(state, obstacle, radius):
+    return jnp.linalg.norm(state[:2] - obstacle[:2]) - radius
+
+
+# function to simulate the discrete time dynamics given initial state and control sequence
+@functools.partial(jax.jit, static_argnames=["dt_dynamics"])
+def simulate_discrete_time_dynamics(dt_dynamics, state, controls, t0, dt):
+    states = [state]
+    t = t0
+    for c in controls:
+        state = dt_dynamics(state, c, t)
+        states.append(state)
+        t += dt
+    return jnp.stack(states)
+
+
+# jit the linearize constraint functions to make it run faster
+linearize_obstacle = jax.jit(jax.vmap(jax.grad(obstacle_constraint), in_axes=[0, None, None]))
+
+# set up the problem parameters
+planning_horizon = 25  # length of the planning horizon
+num_time_steps = 50  # number of time steps to simulate
+num_sqp_iterations = 15  # number of SQP iterations
+t = 0.  # this doesn't affect anything, but a value is needed
+
+# control and velocity limits
+v_max = 1.5
+v_min = 0.
+acceleration_max = 1.0
+acceleration_min = -1.0
+steering_max = 0.5
+steering_min = -0.5
+
+# obstacle parameters
+obstacle_location = jnp.array([1.0, 0.0])  # obstacle location
+obstacle_location_2  = jnp.array([3.0,-0.5])
+obstacle_radius = 0.5  # obstacle radius
+robot_radius = 0.1  # robot radius
+
+# set up cvxpy problem variables and parameters
+xs = cp.Variable([planning_horizon + 1, state_dim])  # cvx variable for states
+us = cp.Variable([planning_horizon, control_dim])  # cvx variable for controls
+slack = cp.Variable(1)  # slack variable to make sure the problem is feasible
+slack_2 = cp.Variable(1)
+As = [cp.Parameter([state_dim, state_dim]) for _ in range(planning_horizon)]  # parameters for linearized dynamics
+Bs = [cp.Parameter([state_dim, control_dim]) for _ in range(planning_horizon)]  # parameters for linearized dynamics
+Cs = [cp.Parameter([state_dim]) for _ in range(planning_horizon)]  # parameters for linearized dynamics
+
+Gs = [cp.Parameter([state_dim]) for _ in range(planning_horizon + 1)]  # parameters for linearized constraints
+Gs_2 = [cp.Parameter([state_dim]) for _ in range(planning_horizon + 1)]  # parameters for linearized constraints
+hs = [cp.Parameter(1) for _ in range(planning_horizon + 1)]  # parameters for linearized constraints
+hs_2 = [cp.Parameter(1) for _ in range(planning_horizon + 1)]  # parameters for linearized constraints
+xs_previous = cp.Parameter([planning_horizon + 1, state_dim])  # parameter for previous solution
+us_previous = cp.Parameter([planning_horizon, control_dim])  # parameter for previous solution
+initial_state = cp.Parameter([state_dim])  # parameter for current robot state
+
+# set up cvxpy problem cost and constraints
+beta1 = 0.2  # coefficient for control effort
+beta2 = 5.  # coefficient for progress
+beta3 = 10.  # coefficient for trust region
+slack_penalty = 1000.  # coefficient for slack variable
+markup = 1.05
+
+objective = beta2 * (xs[-1, 2] ** 2 + xs[-1, 1] ** 2 - xs[-1, 0]) + beta3 * (
+        cp.sum_squares(xs - xs_previous) + cp.sum_squares(us - us_previous)) + slack_penalty * (slack ** 2 + slack_2 ** 2)
+constraints = [xs[0] == initial_state, slack >= 0, slack_2 >= 0]  # initial state and slack constraint
+for t in range(planning_horizon):
+    objective += (beta1 * cp.sum_squares(us[t]) + beta1 * (xs[t, 2] ** 2 + xs[t, 1] ** 2 - xs[t, 0])) * markup ** t
+    constraints += [xs[t + 1] == As[t] @ xs[t] + Bs[t] @ us[t] + Cs[t]]  # dynamics constraint
+    constraints += [xs[t, -1] <= v_max, xs[t, -1] >= v_min, us[t, 1] <= acceleration_max, us[t, 1] >= acceleration_min,
+                    us[t, 0] <= steering_max, us[t, 0] >= steering_min]  # control and velocity limit constraints
+    constraints += [Gs[t] @ xs[t] + hs[t] >= -slack]  # linearized collision avoidance constraint
+    constraints += [Gs_2[t] @ xs[t] + hs_2[t] >= -slack_2]
+constraints += [xs[planning_horizon, -1] <= v_max, xs[planning_horizon, -1] >= v_min,
+                Gs[planning_horizon] @ xs[planning_horizon] + hs[
+                    planning_horizon] >= -slack,Gs_2[planning_horizon] @ xs[planning_horizon] + hs_2[
+                    planning_horizon] >= -slack_2]  # constraints for last planning horizon step
+prob = cp.Problem(cp.Minimize(objective), constraints)  # construct problem
+
+# initial states
+robot_state = jnp.array([-1.5, -0.1, 0., 1.])  # robot starting state
+robot_trajectory = [robot_state]  # list to collect robot's state as it replans
+sqp_list = []  # list to collect each sqp iteration
+robot_control_list = []  # list to collect robot's constrols as it replans
+robot_trajectory_list = []  # list to collect robot's planned trajectories
+
+# initial robot planned state and controls
+previous_controls = jnp.zeros([planning_horizon, control_dim])  # initial guess for robot controls
+previous_states = simulate_discrete_time_dynamics(dt_robot_dynamics, robot_state, previous_controls, 0.,
+                                                  dt)  # initial guess for robot states
+xs_previous.value = np.array(previous_states)  # set xs_previous parameter value
+us_previous.value = np.array(previous_controls)  # set us_previous parameter value
+
+##### ADD COMMENTS TO EXPLAIN THE SQP SOLVER #####
+
+solver = cp.CLARABEL
+
+for t in range(num_time_steps):
+    initial_state.value = np.array(robot_state)
+    sqp_solutions = [previous_states]
+    print("current time step:   ", t)
+    for i in range(num_sqp_iterations):
+        As_value, Bs_value, Cs_value = jax.vmap(linearize, in_axes=[None, 0, 0, None])(dt_robot_dynamics,
+                                                                                       previous_states[:-1],
+                                                                                       previous_controls, 0.)
+
+        ## linearized s_mat
+        Gs_value = linearize_obstacle(previous_states, obstacle_location, obstacle_radius + robot_radius)
+        Gs_value_2 = linearize_obstacle(previous_states, obstacle_location_2, obstacle_radius + robot_radius)
+
+        ## s_fun
+        hs_value = jax.vmap(obstacle_constraint, [0, None, None])(previous_states, obstacle_location,
+                                                                  obstacle_radius + robot_radius) - jax.vmap(jnp.dot,
+                                                                                                             [0, 0])(
+            Gs_value, previous_states)
+
+        hs_value_2 = jax.vmap(obstacle_constraint, [0, None, None])(previous_states, obstacle_location_2,
+                                                                  obstacle_radius + robot_radius) - jax.vmap(jnp.dot,
+                                                                                                             [0, 0])(
+            Gs_value_2, previous_states)
+
+        for i in range(planning_horizon):
+            As[i].value = np.array(As_value[i])
+            Bs[i].value = np.array(Bs_value[i])
+            Cs[i].value = np.array(Cs_value[i])
+            Gs[i].value = np.array(Gs_value[i])
+            Gs_2[i].value = np.array(Gs_value_2[i])
+            hs[i].value = np.array(hs_value[i:i + 1])
+            hs_2[i].value = np.array(hs_value_2[i:i + 1])
+        Gs[planning_horizon].value = np.array(Gs_value[planning_horizon])
+        hs[planning_horizon].value = np.array(hs_value[planning_horizon:planning_horizon + 1])
+        Gs_2[planning_horizon].value = np.array(Gs_value_2[planning_horizon])
+        hs_2[planning_horizon].value = np.array(hs_value_2[planning_horizon:planning_horizon + 1])
+        result = prob.solve(solver=solver)
+
+        previous_controls = us.value
+        previous_states = simulate_discrete_time_dynamics(dt_robot_dynamics, robot_state, previous_controls, 0., dt)
+        sqp_solutions.append(previous_states)
+        xs_previous.value = np.array(previous_states)
+        us_previous.value = np.array(previous_controls)
+    sqp_list.append(np.stack(sqp_solutions))
+    robot_control = previous_controls[0]
+    robot_control_list.append(robot_control)
+    robot_state = dt_robot_dynamics(robot_state, robot_control, 0.)
+    robot_trajectory.append(robot_state)
+    robot_trajectory_list.append(previous_states)
+    previous_states = simulate_discrete_time_dynamics(dt_robot_dynamics, robot_state, previous_controls, 0., dt)
+
+robot_trajectory = jnp.stack(robot_trajectory)
+robot_controls = jnp.stack(robot_control_list)
+
+
+i = 20
+j = 5
+# plotting the results. No need to add comments here. Just run this cell to visualize the results
+fig, axs = plt.subplots(1, 2, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1]})
+# fig, axs = plt.subplots(1,2, figsize=(10, 4))
+ax = axs[0]
+robot_position = robot_trajectory[i, :2]
+circle1 = plt.Circle(robot_position, robot_radius, color='C0', alpha=0.4)
+circle2 = plt.Circle(obstacle_location, obstacle_radius, color='C1', alpha=0.4)
+circle3 = plt.Circle(obstacle_location_2, obstacle_radius, color='C2', alpha=0.4)
+ax.add_patch(circle1)
+ax.add_patch(circle2)
+ax.add_patch(circle3)
+ax.plot(robot_trajectory[:, 0], robot_trajectory[:, 1], "o-", markersize=3, color='black')
+ax.plot(robot_trajectory_list[i][:, 0], robot_trajectory_list[i][:, 1], "o-", markersize=3, color='red',
+        label="planned")
+# Plot planned trajectory for the selected SQP iteration
+planned_trajectory = sqp_list[i][j]
+ax.plot(planned_trajectory[:, 0], planned_trajectory[:, 1], "o-", markersize=3, color='green', alpha=0.4,
+        label="Planned Trajectory")
+ax.scatter(robot_trajectory[i:i + 1, 0], robot_trajectory[i:i + 1, 1], s=30, color='C0', label="Robot")
+ax.set_xlim([-2, 7])
+ax.grid()
+ax.legend()
+ax.axis("equal")
+
+ax.set_title("heading=%.2f velocity=%.2f" % (robot_trajectory[i, 2], robot_trajectory[i, 3]))
+
+ax = axs[1]
+plt.plot(robot_controls)
+plt.scatter([i], robot_controls[i:i + 1, 0], label="$tan(\\delta)$", color='C0')
+plt.scatter([i], robot_controls[i:i + 1, 1], label="Acceleration", color='C1')
+
+plt.hlines(steering_min, 0, num_time_steps - 1, color='C0', linestyle='--')
+plt.hlines(steering_max, 0, num_time_steps - 1, color='C0', linestyle='--')
+plt.hlines(acceleration_min, 0, num_time_steps - 1, color='C1', linestyle='--')
+plt.hlines(acceleration_max, 0, num_time_steps - 1, color='C1', linestyle='--')
+
+plt.plot(robot_trajectory[:, -1], markersize=3, color='C2')
+plt.scatter([i], robot_trajectory[i:i + 1, 3], label="Velocity", color='C2')
+plt.hlines(v_min, 0, num_time_steps - 1, color='C2', linestyle='--')
+plt.hlines(v_max, 0, num_time_steps - 1, color='C2', linestyle='--')
+ax.set_xlim([0, num_time_steps])
+ax.set_ylim([-2, 2])
+ax.set_xlabel("Time step")
+ax.set_ylabel("Control")
+ax.set_title("Velocity, steering and acceleration")
+ax.legend()
+ax.grid()
+plt.show()
+#
+# @interact(i=(0, num_time_steps - 1), j=(0, num_sqp_iterations - 1))
+# def plot(i, j):
+#     fig, axs = plt.subplots(1, 2, figsize=(12, 4), gridspec_kw={'width_ratios': [2, 1]})
+#     # fig, axs = plt.subplots(1,2, figsize=(10, 4))
+#     ax = axs[0]
+#     robot_position = robot_trajectory[i, :2]
+#     circle1 = plt.Circle(robot_position, robot_radius, color='C0', alpha=0.4)
+#     circle2 = plt.Circle(obstacle_location, obstacle_radius, color='C1', alpha=0.4)
+#     ax.add_patch(circle1)
+#     ax.add_patch(circle2)
+#     ax.plot(robot_trajectory[:, 0], robot_trajectory[:, 1], "o-", markersize=3, color='black')
+#     ax.plot(robot_trajectory_list[i][:, 0], robot_trajectory_list[i][:, 1], "o-", markersize=3, color='red',
+#             label="planned")
+#     # Plot planned trajectory for the selected SQP iteration
+#     planned_trajectory = sqp_list[i][j]
+#     ax.plot(planned_trajectory[:, 0], planned_trajectory[:, 1], "o-", markersize=3, color='green', alpha=0.4,
+#             label="Planned Trajectory")
+#     ax.scatter(robot_trajectory[i:i + 1, 0], robot_trajectory[i:i + 1, 1], s=30, color='C0', label="Robot")
+#     ax.set_xlim([-2, 7])
+#     ax.grid()
+#     ax.legend()
+#     ax.axis("equal")
+#
+#     ax.set_title("heading=%.2f velocity=%.2f" % (robot_trajectory[i, 2], robot_trajectory[i, 3]))
+#
+#     ax = axs[1]
+#     plt.plot(robot_controls)
+#     plt.scatter([i], robot_controls[i:i + 1, 0], label="$tan(\\delta)$", color='C0')
+#     plt.scatter([i], robot_controls[i:i + 1, 1], label="Acceleration", color='C1')
+#
+#     plt.hlines(steering_min, 0, num_time_steps - 1, color='C0', linestyle='--')
+#     plt.hlines(steering_max, 0, num_time_steps - 1, color='C0', linestyle='--')
+#     plt.hlines(acceleration_min, 0, num_time_steps - 1, color='C1', linestyle='--')
+#     plt.hlines(acceleration_max, 0, num_time_steps - 1, color='C1', linestyle='--')
+#
+#     plt.plot(robot_trajectory[:, -1], markersize=3, color='C2')
+#     plt.scatter([i], robot_trajectory[i:i + 1, 3], label="Velocity", color='C2')
+#     plt.hlines(v_min, 0, num_time_steps - 1, color='C2', linestyle='--')
+#     plt.hlines(v_max, 0, num_time_steps - 1, color='C2', linestyle='--')
+#     ax.set_xlim([0, num_time_steps])
+#     ax.set_ylim([-2, 2])
+#     ax.set_xlabel("Time step")
+#     ax.set_ylabel("Control")
+#     ax.set_title("Velocity, steering and acceleration")
+#     ax.legend()
+#     ax.grid()
