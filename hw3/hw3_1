@@ -41,7 +41,7 @@ def plot_uncertainty_ellipse(ax, mean, cov, confidence=0.95, dim=2, **kwargs):
 # In the prediction step, we use the robot dynamics to predict the next state and its covariance.
 # In the update step, we use the measurement to update the predicted state and covariance.
 
-def ekf_step(x, P, u, z, Q, R, dt_robot_dynamics, measurement_model):
+def ekf_step(x, P, u, z, Q, R, dt_robot_dynamics, measurement_model, case):
     """
     Perform one step of the EKF algorithm.
     Inputs:
@@ -71,22 +71,26 @@ def ekf_step(x, P, u, z, Q, R, dt_robot_dynamics, measurement_model):
 
     # Update step
     # compute innovation (residual)
-    y = z - measurement_model(x, u, t)
-
+    h = measurement_model(x_pred, u, t)
+    y = z - h
+    y = y.at[3].set(wrap_to_pi(y[3]))
     # Compute the H matrix
-    H = jnp.array([[1., 0., 0.],
-                   [0., 1., 0.]])
+    # 2x3
+    # 4x5
+    H  = jax.jacobian(lambda x_pred: measurement_model(x_pred,u,t))(x_pred)
+    # H = jnp.array([[1., 0., 0.],
+    #                [0., 1., 0.]])
 
     # compute S matrix
     # 2x3, 3x3, 3x2 + 2x2
+    # 4x5, 5x5, 5x4 + 4x4
     S = H @ P_pred @ H.T + R
-
     # Compute Kalman gain
     K = P_pred @ H.T @ jnp.linalg.inv(S)
 
     # Update the state estimate and covariance
-    x_upd = x + K @ y
-    P_upd = (jnp.eye(3) - K @ H) @ P_pred
+    x_upd = x_pred + K @ y
+    P_upd = (jnp.eye(len(H[0,:])) - K @ H) @ P_pred
 
     return x_upd, P_upd  # UPDATE THIS LINE
 
@@ -130,7 +134,7 @@ P0 = jnp.eye(state_dim)  # initial state estimate covariance
 Q = jnp.diag(jnp.array([0.05, 0.05, 0.01]))  # process noise covariance
 R = jnp.diag(jnp.array([2., 2.]))  # measurement noise covariance
 x0 = jnp.array([0., 0., jnp.pi / 4])  # true initial state
-
+case = 1
 n_timesteps = 100  # number of timesteps of run
 
 # set up lists to store the state estimates, true states, covariances, measurements, and times
@@ -169,15 +173,15 @@ for ti in range(n_timesteps):
     x_next_true = x_next_true.at[2].set(wrap_to_pi(x_next_true[2]))
 
     # get the measurement with measurement noise
-    z = measurement_model(x_next_true,t,ti) + measurement_noise[ti]
+    z = measurement_model(x_next_true, t, ti) + measurement_noise[ti]
 
     # wrap the angle to [-pi, pi]
+    ## why third measured state?
     # TODO: uncomment the line below to wrap the angle to [-pi, pi]
-    z = z.at[2].set(wrap_to_pi(z[2]))
+    # z = z.at[2].set(wrap_to_pi(z[2]))
 
     # perform one step of the EKF algorithm
-    x, P = ekf_step(xs_est[ti], Ps[ti],u,z,Q,R,dt_robot_dynamics, measurement_model)
-
+    x, P = ekf_step(xs_est[ti], Ps[ti], u, z, Q, R, dt_robot_dynamics, measurement_model, case)
 
     # wrap the angle to [-pi, pi]
     # TODO: uncomment the line below to wrap the angle to [-pi, pi]
@@ -199,12 +203,11 @@ measurements = jnp.stack(measurements)
 Ps = jnp.stack(Ps)
 ts = jnp.array(ts)
 
-
 confidence = 0.95
 scale = jnp.sqrt(chi2.ppf(0.95, df=3))
 
 plt.figure(figsize=(9, 8))
-plt.subplot(2,2,1)
+plt.subplot(2, 2, 1)
 ax = plt.gca()
 plt.plot(xs_true[:, 0], xs_true[:, 1], 'o-', label='True trajectory', color='blue', markersize=3)
 plt.plot(xs_est[:, 0], xs_est[:, 1], 'o-', label='Estimated trajectory', color='red', markersize=3)
@@ -214,9 +217,9 @@ plt.scatter(measurements[:, 0], measurements[:, 1], color='green', s=10, label='
 plt.scatter(xs_est[0, 0], xs_est[0, 1], color='black', s=30, label='Initial state')
 plt.scatter(xs_true[0, 0], xs_true[0, 1], color='black', s=30)
 
-plot_uncertainty_ellipse(ax, xs_est[0][:2], Ps[0][:2,:2], confidence=0.95, alpha=0.1, label="Uncertainty 95%")
+plot_uncertainty_ellipse(ax, xs_est[0][:2], Ps[0][:2, :2], confidence=0.95, alpha=0.1, label="Uncertainty 95%")
 for (mu, sigma) in zip(xs_est[1:], Ps[1:]):
-    plot_uncertainty_ellipse(ax, mu[:2], sigma[:2,:2], confidence=0.95, alpha=0.1)
+    plot_uncertainty_ellipse(ax, mu[:2], sigma[:2, :2], confidence=0.95, alpha=0.1)
 plt.xlabel('x')
 plt.ylabel('y')
 plt.title('Trajectory')
@@ -224,32 +227,35 @@ plt.legend()
 plt.axis('equal')
 plt.grid()
 
-plt.subplot(2,2,2)
+plt.subplot(2, 2, 2)
 plt.plot(ts, xs_true[:, 0], label='True x position', color='blue')
 plt.plot(ts, xs_est[:, 0], label='Estimated x position', color='red')
 plt.scatter(ts[1:], measurements[:, 0], color='green', s=10, label='Measurements')
-plt.errorbar(ts, xs_est[:, 0], yerr=scale * jnp.sqrt(Ps[:, 0, 0]), fmt='.', color='red', alpha=0.2, label='Uncertainty 95%')
+plt.errorbar(ts, xs_est[:, 0], yerr=scale * jnp.sqrt(Ps[:, 0, 0]), fmt='.', color='red', alpha=0.2,
+             label='Uncertainty 95%')
 plt.xlabel('Time')
 plt.ylabel('x position (m)')
 plt.title('x position')
 plt.legend()
 plt.grid()
 
-plt.subplot(2,2,3)
+plt.subplot(2, 2, 3)
 plt.plot(ts, xs_true[:, 1], label='True y position', color='blue')
 plt.plot(ts, xs_est[:, 1], label='Estimated y position', color='red')
 plt.scatter(ts[1:], measurements[:, 1], color='green', s=10, label='Measurements')
-plt.errorbar(ts, xs_est[:, 1], yerr=scale * jnp.sqrt(Ps[:, 1, 1]), fmt='.', color='red', alpha=0.2, label='Uncertainty 95%')
+plt.errorbar(ts, xs_est[:, 1], yerr=scale * jnp.sqrt(Ps[:, 1, 1]), fmt='.', color='red', alpha=0.2,
+             label='Uncertainty 95%')
 plt.xlabel('Time')
 plt.ylabel('y position (m)')
 plt.title('y position')
 plt.legend()
 plt.grid()
 
-plt.subplot(2,2,4)
+plt.subplot(2, 2, 4)
 plt.plot(ts, xs_true[:, 2], label='True angle', color='blue')
 plt.plot(ts, xs_est[:, 2], label='Estimated angle', color='red')
-plt.errorbar(ts, xs_est[:, 2], yerr=scale * jnp.sqrt(Ps[:, 2, 2]), fmt='.', color='red', alpha=0.2, label='Uncertainty 95%')
+plt.errorbar(ts, xs_est[:, 2], yerr=scale * jnp.sqrt(Ps[:, 2, 2]), fmt='.', color='red', alpha=0.2,
+             label='Uncertainty 95%')
 plt.xlabel('Time')
 plt.ylabel('Angle (rad)')
 plt.title('heading')
@@ -259,9 +265,261 @@ plt.grid()
 plt.tight_layout()
 plt.show()
 
+#########################################
+from dynamaxsys.base import ControlAffineDynamics
 
+
+# define the continuous time dynamics of the unicycle with landmarks
+class UnicycleLandmark(ControlAffineDynamics):
+    """
+    Unicycle dynamics with landmarks.
+    The state is [x, y, theta, lx, ly], where (lx, ly) are the coordinates of the landmark.
+    The control input is [v, omega], where v is the linear velocity and omega is the angular velocity.
+
+    The dynamics are given by:
+    dx/dt = v * cos(theta)
+    dy/dt = v * sin(theta)
+    dtheta/dt = omega
+    dlx/dt = -ly
+    dly/dt = 0.1 * lx
+
+    The dynamics and control affine, and has the following form:
+    dx/dt = f(x) + g(x) * u
+    where f(x) is the drift dynamics and g(x) is the control Jacobian.
+    """
+
+    state_dim: int = 5
+    control_dim: int = 2
+
+    def __init__(self):
+        def drift_dynamics(state, time):
+            ##### FILL IN CODE HERE #####
+            return jnp.array([0., 0., 0., -state[4], 0.1 * state[3]])  # TODO: UPDATE THIS LINE
+            ##### END OF CODE #####
+
+        def control_jacobian(state, time):
+            ##### FILL IN CODE HERE #####
+
+            return jnp.array([[jnp.cos(state[2]), 0.],
+                              [jnp.sin(state[2]), 0.],
+                              [0., 1.],
+                              [0., 0.],
+                              [0., 0.]])  # TODO: UPDATE THIS LINE
+            ##### END OF CODE #####
+
+        super().__init__(drift_dynamics, control_jacobian, self.state_dim, self.control_dim)
+
+
+# compute the discrete time dynamics of the unicycle with landmarks given the continuous time dynamics
+ct_robot_dynamics = UnicycleLandmark()  # robot dynamics
+dt = 0.1
+dt_robot_dynamics = get_discrete_time_dynamics(ct_robot_dynamics, dt=dt)  # discrete time dynamics
+state_dim = dt_robot_dynamics.state_dim
+control_dim = dt_robot_dynamics.control_dim
 
 #########################################
+obs_dim = 4
 
 
+def measurement_landmark_model(state, control, time):
+    ##### FILL IN CODE HERE #####
+    x = state[0]
+    y = state[1]
+    theta = state[2]
+    lx = state[3]
+    ly = state[4]
+    h = jnp.array([x,y,jnp.sqrt((lx-x)**2+(ly-y)**2),
+                   jnp.arctan2(ly-y,lx-x)-theta])
+    return h
+    ##### END OF CODE #####
 
+
+# P0 = jnp.eye(state_dim)  # initial state estimate covariance
+# Q = jnp.diag(jnp.array([0.05, 0.05, 0.01]))  # process noise covariance
+# R = jnp.diag(jnp.array([2., 2.]))  # measurement noise covariance
+# x0 = jnp.array([0., 0., jnp.pi / 4])  # true initial state
+# n_timesteps = 100  # number of timesteps of run
+#
+# # set up lists to store the state estimates, true states, covariances, measurements, and times
+# xs_est = [x0 + jnp.array([-4.0, 4.0, 0.5])]  # initial state
+
+##### FILL IN CODE HERE #####
+# # UPDATE ALL THESE VALUES
+P0 = jnp.eye(state_dim)  # initial state estimate covariance
+Q = jnp.diag(jnp.array([0.05, 0.05, 0.01, 0.1, 0.1]))  # process noise covariance
+R = jnp.diag(jnp.array([2., 2., 4., 4.]))  # measurement noise covariance
+x0 = jnp.array([0., 0., jnp.pi / 4, 5., 5.])  # true initial state
+case = 2
+n_timesteps = 150  # number of timesteps of run
+
+# set up lists to store the state estimates, true states, covariances, measurements, and times
+xs_est = [x0 + jnp.array([-4.0, 4.0, 0.5, 1.0, -1.0])]  # initial state
+xs_true = [x0]
+Ps = [P0]  # initial covariance
+measurements = []
+ts = []
+
+# seed the random number generator
+# and sample the process noise and measurement noise
+key = jax.random.PRNGKey(0)
+dyn_noise = jax.random.multivariate_normal(key, jnp.zeros(state_dim), Q,
+                                           shape=(n_timesteps,))  # sample from the process noise
+measurement_noise = jax.random.multivariate_normal(key, jnp.zeros(obs_dim), R,
+                                                   shape=(n_timesteps,))  # sample from the measurement noise
+
+# run the EKF algorithm over multiple timesteps
+# Use your implementation from (c) but make sure to use the new dynamics and measurement model defined above!
+
+
+######## TODO: FILL IN CODE BELOW ########
+# most is commented out so the notebook will run without errors
+# but you need to uncomment relevant lines and fill in the code
+
+
+# run the EKF algorithm over multiple timesteps
+for ti in range(n_timesteps):
+    t = ti * dt  # get time
+    ts.append(t)
+
+    # get the control input
+    u = u_func(ti)
+
+    # get the true state with process noise
+    x_next_true = dt_robot_dynamics(xs_true[ti], u) + dyn_noise[ti]
+
+    # wrap the angle to [-pi, pi]
+    # TODO: uncomment the line below to wrap the angle to [-pi, pi]
+    x_next_true = x_next_true.at[2].set(wrap_to_pi(x_next_true[2]))
+
+    # get the measurement with measurement noise
+    z = measurement_landmark_model(x_next_true, u, ti) +  measurement_noise[ti]
+
+    # wrap the angle to [-pi, pi]
+    ## provided code is incorrect, should restrict the fourth measured state (bearing angle)
+    # TODO: uncomment the line below to wrap the angle to [-pi, pi]
+    z = z.at[3].set(wrap_to_pi(z[3]))
+
+    # perform one step of the EKF algorithm
+    x, P = ekf_step(xs_est[ti], Ps[ti], u, z, Q, R, dt_robot_dynamics, measurement_landmark_model, case)
+
+    # wrap the angle to [-pi, pi]
+    # TODO: uncomment the line below to wrap the angle to [-pi, pi]
+    x = x.at[2].set(wrap_to_pi(x[2]))
+
+    # add the new state estimate, true state, covariance, and measurement to the lists
+    # TODO: uncomment the lines below
+    xs_est.append(x)
+    xs_true.append(x_next_true)
+    measurements.append(z)
+    Ps.append(P)
+
+# TODO: uncomment the lines below
+
+ts.append(n_timesteps * dt)
+xs_est = jnp.stack(xs_est)
+xs_true = jnp.stack(xs_true)
+measurements = jnp.stack(measurements)
+Ps = jnp.stack(Ps)
+ts = jnp.array(ts)
+
+confidence = 0.95
+scale = jnp.sqrt(chi2.ppf(0.95, df=5))
+
+plt.figure(figsize=(12, 8))
+plt.subplot(2, 2, 1)
+ax = plt.gca()
+plt.plot(xs_true[:, 0], xs_true[:, 1], 'o-', label='True trajectory', color='blue', markersize=3)
+plt.plot(xs_est[:, 0], xs_est[:, 1], 'o-', label='Estimated trajectory', color='red', markersize=3)
+plt.scatter(xs_true[:, 0], xs_true[:, 1], color='blue', s=10)
+plt.scatter(xs_est[:, 0], xs_est[:, 1], color='red', s=10)
+plt.scatter(measurements[:, 0], measurements[:, 1], color='green', s=10, label='Measurements')
+plt.scatter(xs_est[0, 0], xs_est[0, 1], color='black', s=30, label='Initial state')
+plt.scatter(xs_true[0, 0], xs_true[0, 1], color='black', s=30)
+
+plot_uncertainty_ellipse(ax, xs_est[0][:2], Ps[0][:2, :2], confidence=0.95, alpha=0.1, label="Uncertainty 95%")
+for (mu, sigma) in zip(xs_est[1:], Ps[1:]):
+    plot_uncertainty_ellipse(ax, mu[:2], sigma[:2, :2], confidence=0.95, alpha=0.1)
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('Trajectory')
+plt.legend(ncol=2)
+plt.axis('equal')
+plt.grid()
+
+plt.subplot(2, 2, 2)
+plt.plot(ts, xs_true[:, 0], label='True x position', color='blue')
+plt.plot(ts, xs_est[:, 0], label='Estimated x position', color='red')
+plt.scatter(ts[1:], measurements[:, 0], color='green', s=10, label='Measurements')
+plt.errorbar(ts, xs_est[:, 0], yerr=scale * jnp.sqrt(Ps[:, 0, 0]), fmt='.', color='red', alpha=0.2,
+             label='Uncertainty 95%')
+plt.xlabel('Time')
+plt.ylabel('x position (m)')
+plt.title('x position')
+plt.legend()
+plt.grid()
+
+plt.subplot(2, 2, 3)
+plt.plot(ts, xs_true[:, 1], label='True y position', color='blue')
+plt.plot(ts, xs_est[:, 1], label='Estimated y position', color='red')
+plt.scatter(ts[1:], measurements[:, 1], color='green', s=10, label='Measurements')
+plt.errorbar(ts, xs_est[:, 1], yerr=scale * jnp.sqrt(Ps[:, 1, 1]), fmt='.', color='red', alpha=0.2,
+             label='Uncertainty 95%')
+plt.xlabel('Time')
+plt.ylabel('y position (m)')
+plt.title('y position')
+plt.legend()
+plt.grid()
+
+plt.subplot(2, 2, 4)
+plt.plot(ts, xs_true[:, 2], label='True angle', color='blue')
+plt.plot(ts, xs_est[:, 2], label='Estimated angle', color='red')
+plt.scatter(ts[1:], measurements[:, 2], color='green', s=10, label='Measurements')
+plt.errorbar(ts, xs_est[:, 2], yerr=scale * jnp.sqrt(Ps[:, 2, 2]), fmt='.', color='red', alpha=0.2,
+             label='Uncertainty 95%')
+plt.xlabel('Time')
+plt.ylabel('Angle (rad)')
+plt.title('heading')
+plt.legend()
+plt.grid()
+
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(15, 3))
+plt.subplot(1, 3, 1)
+ax = plt.gca()
+plt.scatter(xs_true[:, 3], xs_true[:, 4], label='True Landmark Location', color='blue', s=20, marker='o')
+plt.scatter(xs_est[:, 3], xs_est[:, 4], label='Estimated Landmark Location', color='red', s=20, marker='o')
+for (mu, sigma) in zip(xs_est, Ps):
+    plot_uncertainty_ellipse(ax, mu[3:], sigma[3:, 3:], confidence=0.95, alpha=0.1)
+plt.xlabel('Landmark x position (m)')
+plt.ylabel('Landmark y position (m)')
+plt.title('Landmark Trajectory')
+plt.legend()
+plt.grid()
+plt.axis('equal')
+
+plt.subplot(1, 3, 2)
+plt.plot(ts, xs_true[:, 3], label='True Landmark x position', color='blue')
+plt.plot(ts, xs_est[:, 3], label='Estimated Landmark x position', color='red')
+plt.errorbar(ts, xs_est[:, 3], yerr=jnp.sqrt(Ps[:, 3, 3]), fmt='.', color='red', alpha=0.2, label='Uncertainty')
+plt.xlabel('Time')
+plt.ylabel('Landmark x position (m)')
+plt.title('Landmark x position')
+plt.legend()
+plt.grid()
+
+plt.subplot(1, 3, 3)
+plt.plot(ts, xs_true[:, 4], label='True Landmark y position', color='blue')
+plt.plot(ts, xs_est[:, 4], label='Estimated Landmark y position', color='red')
+plt.errorbar(ts, xs_est[:, 4], yerr=jnp.sqrt(Ps[:, 4, 4]), fmt='.', color='red', alpha=0.2, label='Uncertainty')
+plt.xlabel('Time')
+plt.ylabel('Landmark y position (m)')
+plt.title('Landmark y position')
+plt.legend()
+plt.grid()
+plt.tight_layout()
+plt.subplots_adjust(wspace=0.4)
+plt.suptitle('Landmark Position Estimation')
+plt.subplots_adjust(top=0.85)
+plt.show()
